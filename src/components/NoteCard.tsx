@@ -4,12 +4,13 @@ import { cn } from '@/lib/utils'
 import type { Note, NotePatch } from '@/lib/notes'
 import { toggleTask } from '@/lib/notes'
 import { cipherNoise, VT_CLASS, vtName } from '@/lib/motion'
+import { remeasure, skipWhenOffscreen } from '@/lib/offscreen'
 import { NoteMarkdown } from './NoteMarkdown'
 import { NoteActions, PinButton } from './NoteActions'
 import { colorVar } from './noteColors'
 import { useI18n } from '@/i18n'
 
-interface Props {
+export interface NoteCardProps {
   note: Note
   /** Position in the unlock "decrypt" animation; undefined = no animation. */
   revealIndex?: number
@@ -20,6 +21,7 @@ interface Props {
   onOpen: (id: string) => void
   onChange: (id: string, patch: NotePatch, immediate?: boolean) => void
   onDeleteForever: (id: string) => void
+  onCopy: (note: Note) => void
   /** Drag-and-drop reordering; omitted where the order can't change (trash). */
   reorder?: ReorderHandlers
   /** This card is being dragged. */
@@ -49,10 +51,11 @@ const isNoteDrag = (e: DragEvent<HTMLElement>) => Array.from(e.dataTransfer.type
 const reveal =
   'opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100'
 
-export const NoteCard = memo(function NoteCard({ note, revealIndex, lifted, focused, onOpen, onChange, onDeleteForever, reorder, dragging, dropTarget, selecting, selected, onSelect }: Props) {
+export const NoteCard = memo(function NoteCard({ note, revealIndex, lifted, focused, onOpen, onChange, onDeleteForever, onCopy, reorder, dragging, dropTarget, selecting, selected, onSelect }: NoteCardProps) {
   const { t } = useI18n()
   const activate = () => (selecting ? onSelect?.(note.id) : onOpen(note.id))
   const change = (patch: NotePatch) => onChange(note.id, patch, true)
+  const cardRef = useRef<HTMLElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const [clipped, setClipped] = useState(false)
   const revealing = revealIndex !== undefined
@@ -69,16 +72,24 @@ export const NoteCard = memo(function NoteCard({ note, revealIndex, lifted, focu
     return () => ro.disconnect()
   }, [note.body])
 
+  useEffect(() => skipWhenOffscreen(cardRef.current!), [])
+  // New content, new height: measure before the card may be skipped again.
+  useEffect(() => remeasure(cardRef.current!), [note.title, note.body, note.labels])
+
   const style = {
     background: colorVar(note.color),
-    viewTransitionName: lifted ? 'none' : vtName(note.id),
+    // The name applies only while `transition()` marks the card (index.css).
+    '--vt': vtName(note.id),
+    viewTransitionName: lifted ? 'none' : undefined,
     viewTransitionClass: focused ? VT_CLASS.editor : VT_CLASS.card,
     '--i': revealIndex ?? 0,
   } as CSSProperties
 
   return (
     <article
+      ref={cardRef}
       role="button"
+      data-note={note.id}
       tabIndex={0}
       aria-label={note.title || t('card.untitled')}
       aria-pressed={selecting ? !!selected : undefined}
@@ -183,7 +194,7 @@ export const NoteCard = memo(function NoteCard({ note, revealIndex, lifted, focu
           <div className="h-2" />
         ) : (
           <div className={cn('-ml-2 mt-1 flex h-8 items-center gap-0.5', reveal)}>
-            <NoteActions note={note} onChange={change} onDeleteForever={() => onDeleteForever(note.id)} />
+            <NoteActions note={note} onChange={change} onDeleteForever={() => onDeleteForever(note.id)} onCopy={() => onCopy(note)} />
           </div>
         )}
       </div>

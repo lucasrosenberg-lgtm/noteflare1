@@ -4,6 +4,26 @@ All notable changes to NoteFlare are recorded here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-18
+
+### Added
+
+- Google Keep import now brings your images: drop the Keep folder or the Takeout .zip with image storage turned on. Without it, notes import as before and you're told how many images were skipped.
+- Images: a gallery of every image in your notes, with a Files tab for other attachments. Search it or filter by label, then jump straight to the note.
+- Rename or delete a label everywhere at once: open the label, then **Edit label**. Renaming to a label that exists merges the two.
+- Make a copy of a note from its menu.
+- Images you've already seen now show offline, and aren't downloaded again each time you open the app.
+
+### Changed
+
+- Images now say what's wrong: offline, deleted, storage turned off or can't be decrypted — with Retry when the connection hiccups, and no more jumping text while they load.
+- Uploads show a preview with progress and a Cancel button.
+
+### Fixed
+
+- Boards with hundreds of notes are quick again: opening a note, typing in it and closing it no longer lag.
+- First-run login setup no longer fails with “Check your connection” when the database migrations weren't applied. It now says so and tells you how to fix it: run `bun run db:migrate:remote`, or deploy again.
+
 ## [0.7.0] - 2026-11-17
 
 ### Added
@@ -131,7 +151,8 @@ First public release.
 - One-click Deploy to Cloudflare button; D1 is created automatically.
 - Runs on the Workers and D1 free tiers.
 
-[Unreleased]: https://github.com/homielab/noteflare/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/homielab/noteflare/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/homielab/noteflare/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/homielab/noteflare/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/homielab/noteflare/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/homielab/noteflare/compare/v0.4.0...v0.5.0

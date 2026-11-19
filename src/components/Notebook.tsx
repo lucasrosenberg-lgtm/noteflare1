@@ -1,27 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { flushSync } from 'react-dom'
-import { Archive, Check, Coffee, Download, FileInput, Fingerprint, FileUp, FolderUp, HardDriveDownload, Info, Keyboard, KeyRound, Languages, LayoutGrid, Lock, LogOut, Moon, Plug, Plus, RefreshCw, Rows3, Search, SquareCheckBig, StickyNote, Sun, Trash2, X } from 'lucide-react'
+import { Archive, Check, Coffee, Download, FileInput, Fingerprint, FileUp, FolderUp, HardDriveDownload, Images, Info, Keyboard, KeyRound, Languages, LayoutGrid, Lock, LogOut, Moon, Pencil, Plug, Plus, RefreshCw, Rows3, Search, SquareCheckBig, StickyNote, Sun, Tag, Trash2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipProvider } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { useVault } from '@/lib/vault'
-import { emptyNote, isEmptyNote, useNotes, type Note, type NotePatch } from '@/lib/notes'
+import { copyNote, emptyNote, isEmptyNote, useNotes, type Note, type NotePatch } from '@/lib/notes'
 import { prefersReducedMotion, transition, VT_CLASS, vtName } from '@/lib/motion'
 import { LANGS, useI18n } from '@/i18n'
 import { useTheme } from '@/hooks/useTheme'
 import { useInstallPrompt } from '@/lib/pwa'
 import { NoteCard, type ReorderHandlers } from './NoteCard'
+import { cardProps, MAX_REVEAL, stableHandlers, type BoardState, type CardHandlers } from '@/lib/cardProps'
 import { neighbourId, reorderPosition } from '@/lib/reorder'
 import { NoteEditor } from './NoteEditor'
 import { LabelMenu } from './LabelMenu'
-import { bulkLabelChanges, commonLabels, undoLabelChanges } from '@/lib/bulkLabels'
+import { bulkLabelChanges, commonLabels, renameLabelChanges, resolveLabel, restoreLabelChanges, undoLabelChanges } from '@/lib/bulkLabels'
+import { RenameLabelDialog } from './RenameLabelDialog'
 import { ChangePassphraseDialog } from './ChangePassphraseDialog'
 import { PasskeysDialog } from './PasskeysDialog'
 import { IntegrationsDialog } from './IntegrationsDialog'
 import { BackupDialog } from './BackupDialog'
-import { AttachmentsContext, attachmentIds, clearAttachments, deleteAttachments } from '@/lib/attachments'
+import { AttachmentsContext, clearAttachments, deleteAttachments, unusedAttachments, uploadAttachment } from '@/lib/attachments'
 import { SaveIndicator, useSyncLabel } from './SaveIndicator'
 import { AboutDialog, type AboutTab } from './AboutDialog'
 import { ShortcutsDialog } from './ShortcutsDialog'
@@ -30,12 +32,13 @@ import { DONATE_URL, takeNewReleases, useUpdates } from '@/lib/updates'
 import { onLaunch, type LaunchAction } from '@/lib/launch'
 import { themeTransition } from '@/lib/motion'
 import { ImportDropzone, type ImportHandle } from './ImportDropzone'
+import { ImageLibrary } from './ImageLibrary'
+import { scanLibrary } from '@/lib/library'
 
-type View = { kind: 'notes' } | { kind: 'archive' } | { kind: 'trash' } | { kind: 'label'; label: string }
+type View = { kind: 'notes' } | { kind: 'archive' } | { kind: 'trash' } | { kind: 'label'; label: string } | { kind: 'images' }
 
 const byPosition = (a: Note, b: Note) => b.position - a.position
 const sameView = (a: View, b: View) => a.kind === b.kind && (a.kind !== 'label' || a.label === (b as typeof a).label)
-const MAX_REVEAL = 18
 const LAYOUT_KEY = 'noteflare:layout'
 type Layout = 'grid' | 'list'
 
@@ -148,6 +151,9 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
     }
   }, [store.notes])
 
+  const library = useMemo(() => scanLibrary(store.notes), [store.notes])
+  const showLibrary = attachments || library.images.length + library.files.length > 0
+
   const visible = useMemo(() => {
     const q = appliedQuery.trim().toLocaleLowerCase()
     return store.notes
@@ -157,6 +163,7 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
           case 'archive': return !n.trashedAt && n.archived
           case 'trash': return !!n.trashedAt
           case 'label': return !n.trashedAt && n.labels.includes(view.label)
+          case 'images': return false
         }
       })
       .filter((n) => !q || `${n.title}\n${n.body}\n${n.labels.join(' ')}`.toLocaleLowerCase().includes(q))
@@ -172,17 +179,12 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
   // Only notes still shown count: a search or a sync may have removed some.
   const picked = selecting ? ordered.filter((n) => selected.has(n.id)) : []
   const canReorder = view.kind !== 'trash' && !selecting
-  const revealIndex = (id: string) => {
-    if (!revealing) return undefined
-    const i = ordered.findIndex((n) => n.id === id)
-    return i >= 0 && i < MAX_REVEAL ? i : undefined
-  }
 
   const newNote = () => {
     const n = emptyNote()
     if (view.kind === 'label') n.labels = [view.label]
     if (view.kind === 'archive') n.archived = true
-    transition(() => setEditing(n))
+    transition(() => setEditing(n), 'none')
   }
 
   // Shortcuts: "/" to search, "c" for a new note, "?" for the list of shortcuts.
@@ -211,7 +213,7 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
     if (a.kind === 'files') return importer.current?.importFiles(a.files)
     const n = { ...emptyNote(), title: a.title, body: a.text }
     upsert(n) // saved straight away, so nothing shared is lost if the app closes
-    transition(() => setEditing(n))
+    transition(() => setEditing(n), 'none')
   }
   useEffect(() => {
     if (store.loading) return
@@ -236,13 +238,15 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
     flush()
     location.assign('/')
   }
-  const open = useCallback(
-    (id: string) => {
-      const n = store.byId.get(id)
-      if (n) transition(() => setEditing(n))
-    },
-    [store.byId],
-  )
+  const open = (id: string) => {
+    const n = store.byId.get(id)
+    // Nothing else moves when a note opens: only its card morphs into the editor.
+    if (n) transition(() => setEditing(n), { id })
+  }
+  const openFromLibrary = (id: string) => {
+    const n = store.byId.get(id)
+    if (n) transition(() => setEditing(n), 'none')
+  }
 
   const moveWithUndo = useCallback(
     (id: string, patch: NotePatch, message: string, undo: NotePatch) => {
@@ -263,21 +267,64 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
     [update, moveWithUndo, t],
   )
 
-  const deleteForever = useCallback(
-    (id: string) => {
-      transition(() => {
-        setEditing((e) => (e?.id === id ? null : e))
-        // Images that only this note used go with it.
-        const mine = attachmentIds(store.byId.get(id)?.body ?? '')
-        const used = new Set(store.notes.filter((n) => n.id !== id).flatMap((n) => attachmentIds(n.body)))
-        void destroy(id).then(() => {
-          toast(t('nb.deletedForever'))
-          deleteAttachments(mine.filter((a) => !used.has(a)))
-        })
+  const deleteForever = (id: string) => {
+    transition(() => {
+      setEditing((e) => (e?.id === id ? null : e))
+      // Images that only this note used go with it, thumbnails included.
+      const unused = unusedAttachments(
+        [store.byId.get(id)?.body ?? ''],
+        store.notes.filter((n) => n.id !== id).map((n) => n.body),
+      )
+      void destroy(id).then(() => {
+        toast(t('nb.deletedForever'))
+        deleteAttachments(unused)
       })
-    },
-    [destroy, t, store.byId, store.notes],
-  )
+    })
+  }
+
+  const copy = (note: Note) => {
+    transition(() => void upsert(copyNote(note), { immediate: true }))
+    toast(t('nb.copied'))
+  }
+
+  const [renaming, setRenaming] = useState<string | null>(null)
+  /** Rename a label on every note (trashed ones too). An existing target merges. One toast undoes it. */
+  const renameLabel = (from: string, typed: string) => {
+    const to = resolveLabel(typed, labels, from)
+    const merged = labels.includes(to)
+    const changes = renameLabelChanges(store.notes, from, to)
+    if (!changes.length) return
+    transition(() => {
+      for (const c of changes) update(c.id, { labels: c.labels }, { immediate: true })
+      setView((v) => (v.kind === 'label' && v.label === from ? { kind: 'label', label: to } : v))
+    })
+    toast(merged ? t('labels.merged', { from, to }) : t('labels.renamed', { l: to }), {
+      action: {
+        label: t('common.undo'),
+        onClick: () =>
+          transition(() => {
+            restoreLabelChanges(changes, (id) => byIdRef.current.get(id)).forEach((c) => update(c.id, { labels: c.labels }, { immediate: true }))
+            setView((v) => (v.kind === 'label' && v.label === to && !merged ? { kind: 'label', label: from } : v))
+          }),
+      },
+    })
+  }
+  /** Take a label off every note (the notes stay), after asking. One toast undoes it. */
+  const deleteLabel = (label: string) => {
+    const changes = bulkLabelChanges(store.notes, label, false)
+    if (!changes.length) return
+    if (!window.confirm(changes.length === 1 ? t('labels.deleteConfirmOne', { l: label }) : t('labels.deleteConfirm', { l: label, n: changes.length }))) return
+    transition(() => {
+      for (const c of changes) update(c.id, { labels: c.labels }, { immediate: true })
+      setView((v) => (v.kind === 'label' && v.label === label ? { kind: 'notes' } : v))
+    })
+    toast(t('labels.deleted', { l: label }), {
+      action: {
+        label: t('common.undo'),
+        onClick: () => undoLabelChanges(changes, (id) => byIdRef.current.get(id), label, false).forEach((c) => update(c.id, { labels: c.labels }, { immediate: true })),
+      },
+    })
+  }
 
   const toggleSelected = useCallback((id: string) => {
     setSelected((cur) => {
@@ -361,17 +408,34 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
     [moveTo],
   )
 
+  // Cards are memoized and there may be hundreds: their handlers keep one identity for good,
+  // so an edit to one note (a new `store.byId` per keystroke) re-renders only that note's card.
+  const handlersRef = useRef<CardHandlers>(null as never)
+  handlersRef.current = { onOpen: open, onChange: change, onDeleteForever: deleteForever, onCopy: copy, onSelect: toggleSelected }
+  const [cardHandlers] = useState(() => stableHandlers(() => handlersRef.current))
+  const board: BoardState = {
+    editingId: editing?.id ?? null,
+    focusId,
+    dragId,
+    overId,
+    selected: selecting ? selected : null,
+    reorder: canReorder ? reorder : undefined,
+    revealing,
+  }
+
   /** Delete everything in the trash forever, after asking. Images only those notes used go too. */
   const emptyTrash = async () => {
     const trashed = store.notes.filter((n) => n.trashedAt)
     if (!trashed.length) return
     if (!window.confirm(trashed.length === 1 ? t('nb.emptyTrashConfirmOne') : t('nb.emptyTrashConfirm', { n: trashed.length }))) return
     const gone = new Set(trashed.map((n) => n.id))
-    const mine = [...new Set(trashed.flatMap((n) => attachmentIds(n.body)))]
-    const used = new Set(store.notes.filter((n) => !gone.has(n.id)).flatMap((n) => attachmentIds(n.body)))
+    const unused = unusedAttachments(
+      trashed.map((n) => n.body),
+      store.notes.filter((n) => !gone.has(n.id)).map((n) => n.body),
+    )
     setEditing((e) => (e && gone.has(e.id) ? null : e))
     for (const n of trashed) await destroy(n.id)
-    deleteAttachments(mine.filter((a) => !used.has(a)))
+    deleteAttachments(unused)
     toast(t('nb.trashEmptied'))
   }
 
@@ -604,7 +668,7 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
           </div>
         </div>
 
-        {/* Notes and labels scroll sideways; Archive and Trash stay put, so they are always in reach. */}
+        {/* Notes and labels scroll sideways; Images, Archive and Trash stay put, so they are always in reach. */}
         <nav aria-label={t('nb.filters')} className="mx-auto flex max-w-[84rem] items-start gap-2 px-3 pb-3 sm:px-6">
           <div
             ref={navRef}
@@ -625,6 +689,7 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
           </ul>
           </div>
           <ul className="flex shrink-0 gap-1 sm:gap-2">
+            {showLibrary && <Chip active={view.kind === 'images'} onClick={() => go({ kind: 'images' })} count={library.images.length} icon={<Images />} label={t('nb.images')} />}
             <Chip active={view.kind === 'archive'} onClick={() => go({ kind: 'archive' })} count={counts.archive} icon={<Archive />} label={t('nb.archive')} />
             <Chip active={view.kind === 'trash'} onClick={() => go({ kind: 'trash' })} count={counts.trash} icon={<Trash2 />} label={t('nb.trash')} />
           </ul>
@@ -647,7 +712,24 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
         )}
 
         {!selecting && view.kind !== 'trash' && !store.loading && visible.length > 0 && (
-          <div className="mb-3 flex justify-end">
+          <div className="mb-3 flex justify-end gap-1">
+            {view.kind === 'label' && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="sm" className="text-muted-foreground">
+                    <Tag /> {t('labels.edit')}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => setRenaming(view.label)}>
+                    <Pencil /> {t('labels.rename')}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => deleteLabel(view.label)}>
+                    <Trash2 /> {t('labels.delete')}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
             <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => setSelected(new Set())}>
               <SquareCheckBig /> {t('nb.select')}
             </Button>
@@ -656,21 +738,23 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
 
         {store.loading ? (
           <Skeleton label={t('nb.decryptingNotes')} />
+        ) : view.kind === 'images' ? (
+          <ImageLibrary library={library} query={appliedQuery} onOpenNote={openFromLibrary} />
         ) : !visible.length ? (
           <Empty view={view} query={appliedQuery} onNew={newNote} />
         ) : (
           <>
             {pinned.length > 0 && (
               <Section label={t('nb.pinned')} layout={layout}>
-                {pinned.map((n) => (
-                  <NoteCard key={n.id} note={n} revealIndex={revealIndex(n.id)} lifted={editing?.id === n.id} focused={focusId === n.id} onOpen={open} onChange={change} onDeleteForever={deleteForever} reorder={canReorder ? reorder : undefined} dragging={dragId === n.id} dropTarget={overId === n.id} selecting={selecting} selected={selecting && selected.has(n.id)} onSelect={toggleSelected} />
+                {pinned.map((n, i) => (
+                  <NoteCard key={n.id} {...cardProps(n, i, board, cardHandlers)} />
                 ))}
               </Section>
             )}
             {others.length > 0 && (
               <Section label={pinned.length ? t('nb.others') : undefined} layout={layout}>
-                {others.map((n) => (
-                  <NoteCard key={n.id} note={n} revealIndex={revealIndex(n.id)} lifted={editing?.id === n.id} focused={focusId === n.id} onOpen={open} onChange={change} onDeleteForever={deleteForever} reorder={canReorder ? reorder : undefined} dragging={dragId === n.id} dropTarget={overId === n.id} selecting={selecting} selected={selecting && selected.has(n.id)} onSelect={toggleSelected} />
+                {others.map((n, i) => (
+                  <NoteCard key={n.id} {...cardProps(n, pinned.length + i, board, cardHandlers)} />
                 ))}
               </Section>
             )}
@@ -724,6 +808,7 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
       <ImportDropzone
         ref={importer}
         enabled={!editing && !pwOpen && !pkOpen && !intOpen && !backupOpen && !aboutOpen && !keysOpen}
+        images={{ enabled: attachments, upload: (file) => uploadAttachment(dek, file) }}
         onImport={importMany}
         onDone={() => {
           setQuery('')
@@ -739,7 +824,9 @@ export function Notebook({ dek }: { dek: CryptoKey }) {
         onSave={(n) => upsert(n)}
         onClose={closeEditor}
         onDeleteForever={deleteForever}
+        onCopy={copy}
       />
+      <RenameLabelDialog label={renaming} labels={labels} onClose={() => setRenaming(null)} onRename={renameLabel} />
       <ChangePassphraseDialog open={pwOpen} onOpenChange={setPwOpen} />
       <PasskeysDialog open={pkOpen} onOpenChange={setPkOpen} />
       <IntegrationsDialog open={intOpen} onOpenChange={setIntOpen} />
